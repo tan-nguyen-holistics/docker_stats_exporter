@@ -85,6 +85,11 @@ const gaugeBlockIoWrittenBytes = new prom.Gauge({
     'help': 'Block IO written in bytes',
     'labelNames': ['name', 'id'],
 });
+const counterFailureRestartCount = new prom.Counter({
+    'name': appName + '_failure_restart_count',
+    'help': 'Number of failure restart time. ',
+    'labelNames': ['name', 'id']
+})
 
 // Register all metrics
 console.log(`INFO: Registering Prometheus metrics...`);
@@ -98,6 +103,7 @@ register.registerMetric(gaugeNetworkReceivedBytes);
 register.registerMetric(gaugeNetworkTransmittedBytes);
 register.registerMetric(gaugeBlockIoReadBytes);
 register.registerMetric(gaugeBlockIoWrittenBytes);
+register.registerMetric(counterFailureRestartCount);
 if (collectDefaultMetrics) {
     prom.collectDefaultMetrics({
         timeout: 5000,
@@ -131,17 +137,23 @@ async function gatherMetrics() {
         // Get all containers
         const containers = await docker.listContainers();
         if (!containers || !Array.isArray(containers) || !containers.length) {
+            register.resetMetrics();
             throw new Error('ERROR: Unable to get containers');
         }
 
         // Get stats for each container in one go
         const promises = [];
+        const inspectPromises = [];
         for (let container of containers) {
             if (container.Id) {
-                promises.push(docker.getContainer(container.Id).stats({ 'stream': false, 'decode': true }));
+                const containerObj = docker.getContainer(container.Id);
+                promises.push(containerObj.stats({ 'stream': false, 'decode': true }));
+                // https://docs.docker.com/engine/api/v1.43/#tag/Container/operation/ContainerInspect
+                inspectPromises.push(containerObj.inspect({ 'stream': false, 'decode': true }));
             }
         }
         const results = await Promise.all(promises);
+        const inspectResults = await Promise.all(inspectPromises);
 
         // Reset all to zero before proceeding
         register.resetMetrics();
@@ -212,10 +224,19 @@ async function gatherMetrics() {
                 gaugeBlockIoReadBytes.set(labels, ioRead);
                 gaugeBlockIoWrittenBytes.set(labels, ioWrite);
             }
-
         }
+
+        inspectResults.forEach(result => {
+           const labels = {
+               'name': result.Name.replace('/', ''),
+               'id': result.Id.slice(0, 12),
+           }
+           // the metric already  reset to 0 => call `inc` = set value of counter metrics
+           if (Number.isInteger(result.RestartCount)) {
+               counterFailureRestartCount.inc(labels, result.RestartCount)
+           }
+        });
     } catch (err) {
         console.log('ERROR: ' + err);
     }
 }
-
